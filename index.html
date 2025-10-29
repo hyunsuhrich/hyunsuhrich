@@ -1,133 +1,297 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ko">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Teachable Machine Character</title>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Teachable Machine — Character with '위' action</title>
 
-    <!-- ✅ Teachable Machine + TensorFlow.js -->
-    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+  <!-- 1) TensorFlow.js 를 먼저 로드 (반드시 tmImage 전에) -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
 
-    <style>
-      body {
-        margin: 0;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        height: 100vh;
-        background: #f2f5f8;
-        font-family: "Noto Sans KR", sans-serif;
+  <!-- 2) Teachable Machine image 라이브러리 -->
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+  <style>
+    /* 간단한 화면 스타일 (중3도 이해 가능하도록 단순) */
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans KR", sans-serif; margin: 18px; background:#f2f6fb; color:#102 */
+, display:flex; gap:18px; flex-wrap:wrap; justify-content:center; }
+    .panel { background:#fff; border-radius:10px; padding:12px; box-shadow:0 6px 20px rgba(15,23,42,.06); }
+    #webcam-container { width:320px; height:240px; background:#000; border-radius:8px; overflow:hidden; }
+    #predictions { width:240px; }
+    .pred-row { display:flex; justify-content:space-between; align-items:center; padding:6px 8px; border-radius:6px; margin-bottom:6px; background:#fbfdff; }
+    .stage { width:620px; height:360px; border-radius:10px; background:linear-gradient(#e8f7ff,#ffffff); display:flex; align-items:flex-end; justify-content:center; padding:20px; position:relative; }
+    .ground { position:absolute; left:0; right:0; bottom:0; height:18px; background:#2d3748; border-radius:6px; }
+    .character { width:64px; height:64px; border-radius:10px; background:linear-gradient(#ffdd6b,#ff9f1c); box-shadow:0 6px 18px rgba(0,0,0,.12); transform:translateX(0) translateY(0); }
+    .hud { margin-top:8px; display:flex; gap:8px; align-items:center; }
+    .small { font-size:13px; color:#475569; }
+    button { padding:8px 10px; border-radius:8px; border:0; background:#0ea5e9; color:#fff; cursor:pointer; }
+    @media (max-width:900px){ .stage { width:100%; } }
+  </style>
+</head>
+<body>
+
+  <!-- 좌측: 웹캠 + 예측 -->
+  <div class="panel">
+    <h3>웹캠 & 예측</h3>
+    <div style="display:flex; gap:10px;">
+      <div id="webcam-container" class="panel"></div>
+      <div id="predictions" class="panel"></div>
+    </div>
+    <div class="hud">
+      <div class="small">모델: <span id="model-url"></span></div>
+      <div style="flex:1"></div>
+      <button id="startBtn">시작</button>
+      <button id="stopBtn" style="background:#94a3b8">중지</button>
+    </div>
+    <div style="margin-top:8px;" class="small">
+      클래스: <strong>왼쪽, 오른쪽, 점프, 가만히, 위</strong> (모델과 동일해야 작동)
+    </div>
+  </div>
+
+  <!-- 우측: 스테이지(캐릭터) -->
+  <div class="panel stage" id="stage">
+    <div id="characterWrap" style="width:100%;display:flex;align-items:flex-end;justify-content:center;position:relative;">
+      <div id="character" class="character" style="transform:translateX(0px) translateY(0px)"></div>
+    </div>
+    <div class="ground"></div>
+  </div>
+
+<script>
+/*
+  전체 동작 요약:
+  - Teachable Machine 모델을 불러와 웹캠 영상을 예측한다.
+  - 예측 결과에 따라 캐릭터가 좌우 이동, 점프, 또는 '위' 동작(위로 지속 이동)을 한다.
+  - 예측값은 부드럽게(smoothing) 처리하여 노이즈를 줄임.
+*/
+
+const MODEL_BASE_URL = "https://teachablemachine.withgoogle.com/models/Sny7WS_GP/";
+document.getElementById('model-url').textContent = MODEL_BASE_URL + 'model.json';
+
+// 화면/웹캠 크기 설정
+const VIDEO_WIDTH = 320;
+const VIDEO_HEIGHT = 240;
+
+// smoothing 및 동작 임계값
+const SMOOTHING_ALPHA = 0.35;   // 지수이동평균 계수 (0~1) — 작을수록 더 부드러움
+const ACTION_THRESHOLD = 0.55;  // 이 값보다 높아야 동작으로 인정
+
+// 캐릭터 물리 변수
+const charEl = document.getElementById('character');
+let x = 0;        // 가로 위치 (px)
+let vx = 0;       // 가로 속도
+let vy = 0;       // 세로 속도
+let posY = 0;     // 세로 offset (0 = 바닥)
+let onGround = true;
+const SPEED = 3.5;         // 좌우 속도
+const JUMP_VELOCITY = -12; // 점프 초기 속도 (위로)
+const GRAVITY = 0.7;       // 중력
+const FLY_SPEED = 3.5;     // '위' 동작(비행/부스터)의 속도 (위로)
+
+// 예측/모델 관련
+let model = null;
+let webcam = null;
+let maxPredictions = 0;
+let rafId = null;
+let running = false;
+let smoothed = {};     // {label: smoothedProb}
+let labels = [];       // 클래스 이름 배열
+
+// 클래스 이름 -> 동작 매핑 (모델에서 학습한 정확한 텍스트와 동일해야 함)
+const ACTIONS = {
+  "왼쪽": "left",
+  "오른쪽": "right",
+  "점프": "jump",
+  "가만히": "idle",
+  "위": "up"   // 새로 추가된 '위' 를 'up' 동작으로 처리
+};
+
+// 안전한 초기화 함수 (tf, tmImage 로드 확인 포함)
+async function init() {
+  try {
+    if (typeof tf === 'undefined') throw new Error('TensorFlow.js (tf) 가 로드되지 않았습니다.');
+    if (typeof tmImage === 'undefined') throw new Error('Teachable Machine 이미지 라이브러리(tmImage) 가 로드되지 않았습니다.');
+
+    // 모델 로드 (model.json, metadata.json)
+    const modelURL = MODEL_BASE_URL + 'model.json';
+    const metadataURL = MODEL_BASE_URL + 'metadata.json';
+    console.log('모델 로드:', modelURL);
+    model = await tmImage.load(modelURL, metadataURL);
+
+    // 클래스(레이블) 수와 이름 얻기
+    if (model.getTotalClasses) {
+      maxPredictions = model.getTotalClasses();
+      for (let i = 0; i < maxPredictions; i++) {
+        labels.push(model.getClassLabel(i));
       }
-      #canvas {
-        border: 3px solid #444;
-        border-radius: 10px;
-        background: #fff;
-      }
-      h1 {
-        margin-bottom: 20px;
-      }
-    </style>
-  </head>
-  <body>
-    <h1>Teachable Machine Character</h1>
-    <canvas id="canvas" width="400" height="400"></canvas>
+    } else {
+      // 안정장치: 모델 구조가 다를 때
+      console.warn('getTotalClasses가 없음 — predict로부터 레이블 추출 시도');
+      const tmpCam = new tmImage.Webcam(1,1);
+      await tmpCam.setup();
+      await tmpCam.play();
+      const preds = await model.predict(tmpCam.canvas);
+      preds.forEach(p => labels.push(p.className));
+      tmpCam.stop();
+      maxPredictions = labels.length;
+    }
+    console.log('레이블:', labels);
 
-    <script>
-      const URL = "https://teachablemachine.withgoogle.com/models/Sny7WS_GP/";
-      let model, webcam, labelContainer, maxPredictions;
-      let characterX = 200;
-      let characterY = 300;
-      let velocityY = 0;
-      let isJumping = false;
+    // smoothed 초기화 (0으로)
+    labels.forEach(l => { smoothed[l] = 0; });
 
-      const ACTIONS = {
-        "왼쪽": "left",
-        "오른쪽": "right",
-        "점프": "jump",
-        "가만히": "idle",
-      };
+    // 웹캠 설정
+    webcam = new tmImage.Webcam(VIDEO_WIDTH, VIDEO_HEIGHT, true); // true -> flip (거울처럼)
+    await webcam.setup();  // 브라우저가 카메라 권한을 물어봄
+    await webcam.play();
 
-      async function init() {
-        const modelURL = URL + "model.json";
-        const metadataURL = URL + "metadata.json";
+    // 웹캠 캔버스 추가
+    const container = document.getElementById('webcam-container');
+    container.appendChild(webcam.canvas);
 
-        // ✅ 모델과 메타데이터 로드
-        model = await tmImage.load(modelURL, metadataURL);
-        maxPredictions = model.getTotalClasses();
+    // 예측 슬롯 UI 만들기
+    renderPredictionSlots();
 
-        // ✅ 웹캠 세팅
-        const flip = true;
-        webcam = new tmImage.Webcam(200, 200, flip);
-        await webcam.setup();
-        await webcam.play();
-        window.requestAnimationFrame(loop);
+    // 버튼 이벤트
+    document.getElementById('startBtn').addEventListener('click', () => { if (!running) startLoop(); });
+    document.getElementById('stopBtn').addEventListener('click', stopLoop);
 
-        // ✅ 웹캠 화면 추가
-        document.body.appendChild(webcam.canvas);
-      }
+    // 자동 시작
+    startLoop();
+    // 물리(캐릭터) 루프도 별도 실행
+    requestAnimationFrame(simulatePhysics);
 
-      async function loop() {
-        webcam.update();
-        await predict();
-        drawCharacter();
-        window.requestAnimationFrame(loop);
-      }
+  } catch (err) {
+    console.error('초기화 오류:', err);
+    alert('초기화 오류가 발생했습니다. 콘솔을 확인하세요.\n' + (err && err.message ? err.message : err));
+  }
+}
 
-      async function predict() {
-        const prediction = await model.predict(webcam.canvas);
-        let highest = prediction[0];
-        for (let i = 1; i < prediction.length; i++) {
-          if (prediction[i].probability > highest.probability) {
-            highest = prediction[i];
-          }
-        }
+// 예측 UI 슬롯 생성
+function renderPredictionSlots() {
+  const wrap = document.getElementById('predictions');
+  wrap.innerHTML = '<h4>Predictions</h4>';
+  for (let i = 0; i < labels.length; i++) {
+    const label = labels[i];
+    const div = document.createElement('div');
+    div.className = 'pred-row';
+    div.innerHTML = `<div style="min-width:110px">${label}</div><div style="min-width:48px;text-align:right" id="val-${i}">0.00</div>`;
+    wrap.appendChild(div);
+  }
+}
 
-        const action = ACTIONS[highest.className];
-        handleAction(action);
-      }
+// 예측 루프
+async function predictLoop() {
+  if (!running) return;
+  try {
+    webcam.update(); // 웹캠 영상을 최신으로
+    const preds = await model.predict(webcam.canvas); // 예측 결과 배열
 
-      function handleAction(action) {
-        const canvas = document.getElementById("canvas");
-        const ctx = canvas.getContext("2d");
+    // 지수이동평균(smoothing) 적용 및 UI 업데이트
+    let top = {prob:0, label:null, index:-1};
+    for (let i = 0; i < preds.length; i++) {
+      const p = preds[i].probability;
+      const label = preds[i].className;
+      smoothed[label] = SMOOTHING_ALPHA * p + (1 - SMOOTHING_ALPHA) * (smoothed[label] || 0);
+      // UI
+      const valEl = document.getElementById('val-' + i);
+      if (valEl) valEl.textContent = smoothed[label].toFixed(2);
+      if (smoothed[label] > top.prob) top = {prob: smoothed[label], label, index: i};
+    }
 
-        if (action === "left") {
-          characterX -= 5;
-        } else if (action === "right") {
-          characterX += 5;
-        } else if (action === "jump" && !isJumping) {
-          isJumping = true;
-          velocityY = -10;
-        }
+    // 동작 결정: 임계값을 넘는 최상위 라벨을 사용
+    if (top.label && top.prob >= ACTION_THRESHOLD) {
+      const action = ACTIONS[top.label] || 'idle';
+      handleAction(action, top.prob);
+    } else {
+      handleAction('idle', top.prob);
+    }
+  } catch (err) {
+    console.error('예측 에러:', err);
+  } finally {
+    // 계속 루프
+    rafId = requestAnimationFrame(predictLoop);
+  }
+}
 
-        if (isJumping) {
-          characterY += velocityY;
-          velocityY += 0.5;
-          if (characterY >= 300) {
-            characterY = 300;
-            isJumping = false;
-          }
-        }
-      }
+// 실제 캐릭터 움직임 적용
+function handleAction(action, confidence = 0) {
+  // 좌우 이동 처리
+  if (action === 'left') {
+    vx = -SPEED;
+  } else if (action === 'right') {
+    vx = SPEED;
+  } else {
+    // idle이면 속도를 점차 줄임 (관성 느낌)
+    vx *= 0.82;
+    if (Math.abs(vx) < 0.05) vx = 0;
+  }
 
-      function drawCharacter() {
-        const canvas = document.getElementById("canvas");
-        const ctx = canvas.getContext("2d");
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // 점프 처리 (한 번만)
+  if (action === 'jump' && onGround) {
+    vy = JUMP_VELOCITY;
+    onGround = false;
+  }
 
-        // ✅ 바닥
-        ctx.fillStyle = "#ccc";
-        ctx.fillRect(0, 350, 400, 50);
+  // '위' 처리는 지속적으로 위로 올라가게 함 (비행/부스터 느낌)
+  // 예: action === 'up' 인 동안 캐릭터가 위로 올라감 (posY 감소)
+  if (action === 'up') {
+    // 위로 계속 올라갈 수 있게 posY를 줄임 (단, 제한을 걸어 최고 높이에서 멈춤)
+    posY -= FLY_SPEED;
+    if (posY < -220) posY = -220; // 윗 한계 (너가 캔버스 크기에 맞춰 조절 가능)
+    // 비행중엔 중력 영향도 일부 줄임 (더 부드럽게)
+    vy = Math.min(vy, 0); // 위로 올라갈 때는 아래로 떨어지는 속도를 제거
+  }
+}
 
-        // ✅ 캐릭터
-        ctx.fillStyle = "#007bff";
-        ctx.beginPath();
-        ctx.arc(characterX, characterY, 25, 0, Math.PI * 2);
-        ctx.fill();
-      }
+// 캐릭터 물리 시뮬레이션 (중력, 위치 적용)
+function simulatePhysics() {
+  // 가로 위치 업데이트
+  x += vx;
 
-      init();
-    </script>
-  </body>
+  // 세로 물리 (중력 적용)
+  vy += GRAVITY;
+  posY += vy;
+
+  // 땅 충돌 처리 (posY = 0 이면 바닥)
+  if (posY > 0) {
+    posY = 0;
+    vy = 0;
+    onGround = true;
+  } else {
+    onGround = false;
+  }
+
+  // 화면 경계(무대 크기에 따라 제한)
+  const stage = document.getElementById('stage');
+  const stageWidth = stage.clientWidth;
+  const half = stageWidth / 2;
+  const limit = half - 40; // 캐릭터 반폭 고려
+  if (x < -limit) x = -limit;
+  if (x > limit) x = limit;
+
+  // 실제로 DOM에 위치 반영 (가운데 기준으로 translate)
+  // posY는 음수일 때 위로 올라간 상태
+  charEl.style.transform = `translateX(${x}px) translateY(${posY}px)`;
+
+  requestAnimationFrame(simulatePhysics);
+}
+
+// 시작/중지 제어
+function startLoop() {
+  if (running) return;
+  running = true;
+  predictLoop(); // 예측 루프 시작
+}
+function stopLoop() {
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+}
+
+// 페이지가 모두 로드된 뒤 init 실행 (스크립트 순서 문제 방지)
+window.addEventListener('load', () => {
+  init();
+});
+</script>
+
+</body>
 </html>
