@@ -1,263 +1,133 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="ko">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Teachable Machine → Character Control (Fixed)</title>
-  <style>
-    :root{--w:900px}
-    body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", Arial;margin:0;display:flex;gap:20px;align-items:flex-start;padding:18px;background:#f4f7fb;color:#111}
-    .app{width:var(--w);max-width:100%}
-    .panel{background:#fff;border-radius:12px;padding:12px;box-shadow:0 6px 18px rgba(20,30,70,.08)}
-    .preview{display:flex;gap:12px}
-    #webcam-container{position:relative;width:320px;height:240px;overflow:hidden;border-radius:8px;background:#000}
-    #webcam-container canvas{width:100%;height:100%;object-fit:cover}
-    .predictions{flex:1;min-width:220px}
-    .pred{display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:6px;background:#fbfdff}
-    .bar{height:8px;background:#e6eefc;border-radius:999px;overflow:hidden;margin-left:8px;flex:1}
-    .bar > i{display:block;height:100%;width:0%;background:linear-gradient(90deg,#3b82f6,#06b6d4)}
-    .stage{width:var(--w);max-width:100%;height:360px;border-radius:12px;background:linear-gradient(180deg,#dff1ff,#ffffff);display:flex;align-items:flex-end;justify-content:center;padding:20px;box-shadow:0 6px 18px rgba(20,30,70,.06)}
-    .ground{width:100%;height:18px;background:#2d3748;border-radius:6px}
-    .character{position:relative;width:64px;height:64px;border-radius:10px;background:linear-gradient(180deg,#ffce4d,#ff9f1c);box-shadow:0 6px 18px rgba(0,0,0,.15);transform:translateX(0) translateY(0);will-change:transform}
-    .character:after{content:"";position:absolute;left:50%;transform:translateX(-50%);bottom:-10px;width:40px;height:20px;background:rgba(0,0,0,.06);border-radius:50%}
-    .hud{margin-top:10px;display:flex;gap:8px;align-items:center}
-    .hint{font-size:13px;color:#435168}
-    .small{font-size:12px;color:#6b7280}
-    .controls{display:flex;gap:8px}
-    .btn{padding:8px 10px;border-radius:8px;background:#0ea5e9;color:#fff;border:0;cursor:pointer}
-    @media (max-width:900px){body{flex-direction:column;align-items:center}}
-  </style>
-</head>
-<body>
-  <div class="app">
-    <div class="panel">
-      <h3>Teachable Machine — Webcam Preview & Predictions (Fixed)</h3>
-      <div class="preview">
-        <div id="webcam-container"></div>
-        <div class="predictions" id="predictions"></div>
-      </div>
-      <div class="hud">
-        <div class="hint">모델 URL: <span id="model-url" class="small"></span></div>
-        <div style="flex:1"></div>
-        <div class="controls">
-          <button id="startBtn" class="btn">Start</button>
-          <button id="stopBtn" class="btn" style="background:#94a3b8">Stop</button>
-        </div>
-      </div>
-    </div>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Teachable Machine Character</title>
 
-    <div class="stage" style="margin-top:14px;">
-      <div id="characterWrap" style="width:100%;display:flex;align-items:flex-end;justify-content:center;position:relative">
-        <div id="character" class="character" style="transform:translateX(0) translateY(0)"></div>
-      </div>
-      <div class="ground"></div>
-    </div>
+    <!-- ✅ Teachable Machine + TensorFlow.js -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
 
-    <div style="margin-top:8px;font-size:13px;color:#374151">Tip: 클래스 이름은 <strong>오른쪽, 왼쪽, 점프, 가만히</strong>로 학습했다고 가정합니다.</div>
-  </div>
+    <style>
+      body {
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+        background: #f2f5f8;
+        font-family: "Noto Sans KR", sans-serif;
+      }
+      #canvas {
+        border: 3px solid #444;
+        border-radius: 10px;
+        background: #fff;
+      }
+      h1 {
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Teachable Machine Character</h1>
+    <canvas id="canvas" width="400" height="400"></canvas>
 
-  <!-- 중요한 부분: TensorFlow.js를 tmImage보다 먼저 로드 -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
-  <!-- Teachable Machine image library (tmImage) -->
-  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+    <script>
+      const URL = "https://teachablemachine.withgoogle.com/models/Sny7WS_GP/";
+      let model, webcam, labelContainer, maxPredictions;
+      let characterX = 200;
+      let characterY = 300;
+      let velocityY = 0;
+      let isJumping = false;
 
-  <script>
-    /***** 설정 *****/
-    const MODEL_BASE_URL = "https://teachablemachine.withgoogle.com/models/Sny7WS_GP/"; // 사용자 모델 URL
-    document.getElementById('model-url').textContent = MODEL_BASE_URL + 'model.json';
+      const ACTIONS = {
+        "왼쪽": "left",
+        "오른쪽": "right",
+        "점프": "jump",
+        "가만히": "idle",
+      };
 
-    const VIDEO_WIDTH = 320, VIDEO_HEIGHT = 240;
-    const SMOOTHING_ALPHA = 0.3;
-    const ACTION_THRESHOLD = 0.6;
+      async function init() {
+        const modelURL = URL + "model.json";
+        const metadataURL = URL + "metadata.json";
 
-    // 캐릭터 물리
-    const char = document.getElementById('character');
-    let x = 0, vx = 0, vy = 0;
-    const speed = 3.0, jumpVelocity = -12, gravity = 0.6;
-    let onGround = true;
+        // ✅ 모델과 메타데이터 로드
+        model = await tmImage.load(modelURL, metadataURL);
+        maxPredictions = model.getTotalClasses();
 
-    // 예측 관련
-    let model, maxPredictions;
-    let webcam;
-    let rafId;
-    let running = false;
-    let smoothed = {}; // label -> smoothed prob
-    let labels = [];
-
-    // 클래스 이름 매핑 (학습한 정확한 클래스 이름으로 맞춰야 함)
-    const ACTIONS = {
-      '오른쪽': 'right',
-      '왼쪽': 'left',
-      '점프': 'jump',
-      '가만히': 'idle'
-    };
-
-    // 안전한 init: tf와 tmImage가 로드되었는지 확인
-    async function init() {
-      try {
-        if (typeof tf === 'undefined') {
-          throw new Error('TensorFlow.js (tf) 가 로드되지 않았습니다. <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script> 가 필요합니다.');
-        }
-        if (typeof tmImage === 'undefined') {
-          throw new Error('Teachable Machine image 라이브러리(tmImage) 가 로드되지 않았습니다.');
-        }
-
-        // 모델 로드
-        console.log('모델 로드 시도:', MODEL_BASE_URL + 'model.json');
-        model = await tmImage.load(MODEL_BASE_URL + 'model.json', MODEL_BASE_URL + 'metadata.json');
-        maxPredictions = model.getTotalClasses ? model.getTotalClasses() : (model.labels ? model.labels.length : 0);
-        console.log('maxPredictions:', maxPredictions);
-
-        // 레이블 가져오기 (안전하게)
-        labels = [];
-        if (model.getClassLabel) {
-          for (let i = 0; i < maxPredictions; i++) labels.push(model.getClassLabel(i));
-        } else if (model.getClassLabels) {
-          labels = model.getClassLabels();
-        } else if (model.labels) {
-          labels = model.labels;
-        } else {
-          // as fallback, attempt a dummy predict to get labels
-          const tmpCam = new tmImage.Webcam(1,1);
-          await tmpCam.setup();
-          await tmpCam.play();
-          const preds = await model.predict(tmpCam.canvas);
-          preds.forEach(p => labels.push(p.className));
-          tmpCam.stop();
-        }
-        console.log('labels:', labels);
-
-        // webcam 세팅
-        webcam = new tmImage.Webcam(VIDEO_WIDTH, VIDEO_HEIGHT, true);
-        await webcam.setup({ facingMode: 'user' });
+        // ✅ 웹캠 세팅
+        const flip = true;
+        webcam = new tmImage.Webcam(200, 200, flip);
+        await webcam.setup();
         await webcam.play();
-        document.getElementById('webcam-container').appendChild(webcam.canvas);
+        window.requestAnimationFrame(loop);
 
-        // smoothed 초기화
-        labels.forEach(l => smoothed[l] = 0);
-
-        // UI 슬롯 렌더
-        renderPredictionSlots(labels);
-
-        // 버튼 이벤트
-        document.getElementById('startBtn').addEventListener('click', () => { if (!running) startLoop(); });
-        document.getElementById('stopBtn').addEventListener('click', () => { stopLoop(); });
-
-        // 자동 시작
-        startLoop();
-        requestAnimationFrame(simulatePhysics);
-      } catch (err) {
-        console.error('초기화 오류:', err);
-        alert('초기화 오류가 발생했습니다. 콘솔을 확인하세요:\n' + (err && err.message ? err.message : err));
+        // ✅ 웹캠 화면 추가
+        document.body.appendChild(webcam.canvas);
       }
-    }
 
-    function renderPredictionSlots(labels) {
-      const wrap = document.getElementById('predictions');
-      wrap.innerHTML = '';
-      labels.forEach((label, i) => {
-        const node = document.createElement('div');
-        node.className = 'pred';
-        node.innerHTML = `<div style="min-width:80px">${label}</div><div style="display:flex;align-items:center;gap:8px"><div class="bar"><i id="bar-${i}"></i></div><div id="val-${i}" style="min-width:36px;text-align:right;font-size:12px;color:#334155">0.00</div></div>`;
-        wrap.appendChild(node);
-      });
-    }
-
-    async function predictLoop() {
-      if (!running) return;
-      try {
+      async function loop() {
         webcam.update();
-        const predictions = await model.predict(webcam.canvas);
+        await predict();
+        drawCharacter();
+        window.requestAnimationFrame(loop);
+      }
 
-        // smoothing & UI 업데이트
-        let top = {prob: 0, label: null, index: -1};
-        for (let i = 0; i < predictions.length; i++) {
-          const p = predictions[i].probability;
-          const label = predictions[i].className;
-          smoothed[label] = SMOOTHING_ALPHA * p + (1 - SMOOTHING_ALPHA) * (smoothed[label] || 0);
-
-          const pct = Math.round(smoothed[label] * 100);
-          const barEl = document.getElementById('bar-' + i);
-          const valEl = document.getElementById('val-' + i);
-          if (barEl) barEl.style.width = pct + '%';
-          if (valEl) valEl.textContent = smoothed[label].toFixed(2);
-
-          if (smoothed[label] > top.prob) top = {prob: smoothed[label], label, index: i};
+      async function predict() {
+        const prediction = await model.predict(webcam.canvas);
+        let highest = prediction[0];
+        for (let i = 1; i < prediction.length; i++) {
+          if (prediction[i].probability > highest.probability) {
+            highest = prediction[i];
+          }
         }
 
-        if (top.label && top.prob > ACTION_THRESHOLD) {
-          const action = ACTIONS[top.label] || 'idle';
-          handleAction(action, top.prob);
-        } else {
-          handleAction('idle', top.prob);
+        const action = ACTIONS[highest.className];
+        handleAction(action);
+      }
+
+      function handleAction(action) {
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+
+        if (action === "left") {
+          characterX -= 5;
+        } else if (action === "right") {
+          characterX += 5;
+        } else if (action === "jump" && !isJumping) {
+          isJumping = true;
+          velocityY = -10;
         }
-      } catch (err) {
-        console.error('예측 중 오류:', err);
-      } finally {
-        rafId = requestAnimationFrame(predictLoop);
-      }
-    }
 
-    function handleAction(action, confidence) {
-      if (action === 'left') {
-        vx = -speed;
-      } else if (action === 'right') {
-        vx = speed;
-      } else {
-        vx *= 0.8;
-        if (Math.abs(vx) < 0.02) vx = 0;
-      }
-      if (action === 'jump' && onGround) {
-        vy = jumpVelocity;
-        onGround = false;
-      }
-    }
-
-    function simulatePhysics() {
-      // 위치/속도 업데이트
-      x += vx;
-      vy += gravity;
-
-      // vertical pos tracking
-      if (typeof simulatePhysics.posY === 'undefined') simulatePhysics.posY = 0;
-      simulatePhysics.posY += vy;
-      if (simulatePhysics.posY > 0) { // 땅에 충돌
-        simulatePhysics.posY = 0;
-        vy = 0;
-        onGround = true;
-      } else {
-        onGround = false;
+        if (isJumping) {
+          characterY += velocityY;
+          velocityY += 0.5;
+          if (characterY >= 300) {
+            characterY = 300;
+            isJumping = false;
+          }
+        }
       }
 
-      // 화면 경계 (stage 가운데 기준으로 제한)
-      const stage = document.querySelector('.stage');
-      if (stage) {
-        const stageRect = stage.getBoundingClientRect();
-        const halfWidth = stageRect.width / 2;
-        const clamp = halfWidth - 32; // 캐릭터 반폭
-        if (x < -clamp) x = -clamp;
-        if (x > clamp) x = clamp;
+      function drawCharacter() {
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        // ✅ 바닥
+        ctx.fillStyle = "#ccc";
+        ctx.fillRect(0, 350, 400, 50);
+
+        // ✅ 캐릭터
+        ctx.fillStyle = "#007bff";
+        ctx.beginPath();
+        ctx.arc(characterX, characterY, 25, 0, Math.PI * 2);
+        ctx.fill();
       }
 
-      char.style.transform = `translateX(${x}px) translateY(${simulatePhysics.posY}px)`;
-
-      requestAnimationFrame(simulatePhysics);
-    }
-
-    function startLoop() {
-      if (running) return;
-      running = true;
-      // 첫 호출은 predictLoop()를 직접 호출해서 빠르게 시작
-      predictLoop();
-    }
-    function stopLoop() {
-      running = false;
-      if (rafId) cancelAnimationFrame(rafId);
-    }
-
-    // init 실행 (스크립트들 로드된 뒤에 실행되어야 함)
-    // (이 스크립트는 tf와 tmImage 이후에 위치하므로 안전)
-    init();
-  </script>
-</body>
+      init();
+    </script>
+  </body>
 </html>
